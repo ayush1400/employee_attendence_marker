@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attendance Kiosk</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="result" class="hidden" onclick="this.classList.add('hidden')" style="position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);padding:20px">
+  <div class="card" style="text-align:center;max-width:380px;width:100%;margin:0">
+    <div style="font-size:64px;line-height:1">✅</div>
+    <h1 id="r-title" style="margin:8px 0 4px;color:var(--ok)"></h1>
+    <div id="r-name" style="font-size:22px;font-weight:600"></div>
+    <div id="r-sub" class="sub" style="margin-top:6px"></div>
+  </div>
+</div>
+<div class="wrap" style="max-width:560px">
+  <div class="clock" id="clock">--:--:--</div>
+  <div class="date" id="date"></div>
+
+  <div class="card">
+    <div class="sub" id="status" style="text-align:center">Loading face models...</div>
+    <div class="video-box"><video id="video" autoplay muted playsinline></video><canvas id="overlay" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);pointer-events:none"></canvas></div>
+    <div class="row center">
+      <button class="btn in" id="btn-in" disabled>Login</button>
+      <button class="btn out" id="btn-out" disabled>Logout</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+  <div class="sub" style="text-align:center"><a href="/admin">Admin panel</a></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
+<script src="/static/face.js"></script>
+<script>
+const video = $("video");
+let busy = false;
+const REQUIRE_LIVENESS = true; // set to false to skip the blink / head-turn check
+
+function showResult(action, d) {
+  $("r-title").textContent = action === "login" ? "Login Successful" : "Logout Successful";
+  $("r-name").textContent = d.name;
+  let sub = d.emp_code + " • " + d.time;
+  if (action === "login" && d.late) sub += " • Late";
+  if (action === "logout" && d.hours != null) sub += " • Worked " + d.hours + " h";
+  $("r-sub").textContent = sub;
+  $("result").classList.remove("hidden");
+  clearTimeout(showResult.t);
+  showResult.t = setTimeout(() => $("result").classList.add("hidden"), 4000);
+}
+
+function tick() {
+  const n = new Date();
+  $("clock").textContent = n.toLocaleTimeString("en-GB");
+  $("date").textContent = n.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+setInterval(tick, 1000); tick();
+
+function setButtons(on) { $("btn-in").disabled = $("btn-out").disabled = !on; }
+
+async function scan(action) {
+  if (busy) return;
+  busy = true; setButtons(false);
+  try {
+    setMsg("Look at the camera, then blink or turn your head slightly to a side...", "info");
+    if (REQUIRE_LIVENESS && !(await waitForLiveness(video, 10000, box => drawBox($("overlay"), video, box)))) return setMsg("Not detected. Blink or turn your head slightly, then try again.", "err");
+    const desc = await getDescriptor(video);
+    if (!desc) return setMsg("No face detected. Face the camera in good light.", "err");
+    const { ok, data } = await post("/api/mark", { action, descriptor: desc });
+    if (ok) { showResult(action, data); setMsg(data.message, "ok"); }
+    else setMsg("❌ " + data.error, "err");
+  } catch (e) {
+    setMsg("Error: " + e.message, "err");
+  } finally {
+    busy = false; setButtons(true);
+    setTimeout(() => { if (!busy) setMsg(""); }, 6000);
+  }
+}
+$("btn-in").onclick = () => scan("login");
+$("btn-out").onclick = () => scan("logout");
+
+(async () => {
+  try {
+    await loadModels();
+    await startCamera(video);
+    $("status").textContent = "Ready. Face the camera, tap Login or Logout, then blink or turn your head slightly.";
+    setButtons(true);
+    startFaceBox(video, $("overlay"), () => busy,
+      found => { $("status").textContent = found ? "Face detected ✓ — tap Login or Logout" : "No face detected — look at the camera"; });
+  } catch (e) {
+    $("status").textContent = "Could not start camera/models: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>

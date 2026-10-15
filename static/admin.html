@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attendance Admin</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="toast" class="hidden" style="position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:8px;color:#fff;z-index:10;font-size:15px"></div>
+<div class="wrap">
+
+  <!-- login -->
+  <div id="login-view" class="card" style="max-width:380px;margin:60px auto">
+    <h1>Admin login</h1>
+    <div class="sub">Enter the admin password</div>
+    <div class="row">
+      <input type="password" id="pw" placeholder="Password" style="flex:1">
+      <button class="btn" id="btn-login">Login</button>
+    </div>
+    <div id="login-err" class="sub" style="color:var(--err);margin-top:8px"></div>
+  </div>
+
+  <!-- app -->
+  <div id="app-view" class="hidden">
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <div><h1>Attendance Admin</h1><div class="sub" style="margin:0"><a href="/">Kiosk</a></div></div>
+      <button class="btn gray sm" id="btn-logout">Logout</button>
+    </div>
+    <div class="tabs">
+      <button data-tab="today" class="active">Today</button>
+      <button data-tab="emp">Employees</button>
+      <button data-tab="rep">Reports</button>
+      <button data-tab="set">Settings</button>
+    </div>
+
+    <!-- today -->
+    <div id="tab-today" class="card">
+      <div class="row" style="margin-bottom:12px"><input type="date" id="t-date"></div>
+      <div class="stats" id="stats"></div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Code</th><th>Name</th><th>Dept</th><th>Login</th><th>Logout</th><th>Hours</th><th>Status</th></tr></thead>
+        <tbody id="t-body"></tbody></table></div>
+    </div>
+
+    <!-- employees -->
+    <div id="tab-emp" class="hidden">
+      <div class="card">
+        <div class="sub" id="cam-status">Starting camera...</div>
+        <div class="video-box"><video id="video" autoplay muted playsinline></video><canvas id="overlay" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);pointer-events:none"></canvas></div>
+        <div class="row" id="add-form" style="margin-bottom:8px">
+          <label>Name<input id="e-name"></label>
+          <label>Employee code<input id="e-code"></label>
+          <label>Department<input id="e-dept"></label>
+        </div>
+        <div id="reenroll-bar" class="sub hidden"></div>
+        <div class="row">
+          <button class="btn" id="btn-add" disabled>Capture &amp; Register</button>
+          <button class="btn gray hidden" id="btn-cancel">Cancel re-enroll</button>
+        </div>
+        <div id="msg"></div>
+      </div>
+      <div class="card table-scroll"><table>
+        <thead><tr><th>Code</th><th>Name</th><th>Dept</th><th>Status</th><th></th></tr></thead>
+        <tbody id="emp-body"></tbody></table></div>
+    </div>
+
+    <!-- reports -->
+    <div id="tab-rep" class="card hidden">
+      <div class="row" style="margin-bottom:12px">
+        <label>From<input type="date" id="r-from"></label>
+        <label>To<input type="date" id="r-to"></label>
+        <label>Employee code (optional)<input id="r-code"></label>
+        <button class="btn" id="btn-rep" style="align-self:flex-end">Load</button>
+        <button class="btn gray" id="btn-csv" style="align-self:flex-end">Download CSV</button>
+      </div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Date</th><th>Code</th><th>Name</th><th>Login</th><th>Logout</th><th>Hours</th><th>Status</th></tr></thead>
+        <tbody id="r-body"></tbody></table></div>
+    </div>
+
+    <!-- settings -->
+    <div id="tab-set" class="card hidden">
+      <div class="row">
+        <label>Shift start<input type="time" id="s-start"></label>
+        <label>Grace (minutes)<input type="number" id="s-grace" min="0"></label>
+        <label>Full day (hours)<input type="number" id="s-full" step="0.5" min="0"></label>
+        <label>Half day (hours)<input type="number" id="s-half" step="0.5" min="0"></label>
+      </div>
+      <p class="sub">Login after shift start + grace is marked Late. Worked hours at or above Full day = Present, at or above Half day = Half Day, otherwise Short.</p>
+      <button class="btn" id="btn-save">Save settings</button>
+      <div id="set-msg" class="sub" style="margin-top:8px"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
+<script src="/static/face.js"></script>
+<script>
+const today = () => new Date().toLocaleDateString("en-CA");
+let camStarted = false, reenrollId = null;
+
+function toast(text, ok = true) {
+  const t = $("toast");
+  t.textContent = text;
+  t.style.background = ok ? "var(--ok)" : "var(--err)";
+  t.classList.remove("hidden");
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => t.classList.add("hidden"), 2500);
+}
+
+async function api(url, body, method) {
+  const opts = method ? { method } : body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const res = await fetch(url, opts);
+  if (res.status === 401 && !url.includes("/login")) { showLogin(); throw new Error("Not logged in"); }
+  return { ok: res.ok, data: await res.json() };
+}
+
+// ---------- login ----------
+function showLogin() { $("login-view").classList.remove("hidden"); $("app-view").classList.add("hidden"); }
+function showApp() { $("login-view").classList.add("hidden"); $("app-view").classList.remove("hidden"); loadToday(); }
+$("btn-login").onclick = async () => {
+  const { ok, data } = await api("/api/admin/login", { password: $("pw").value });
+  if (ok) { $("pw").value = ""; $("login-err").textContent = ""; showApp(); toast("Login successful ✓"); } else $("login-err").textContent = data.error;
+};
+$("pw").onkeydown = e => { if (e.key === "Enter") $("btn-login").click(); };
+$("btn-logout").onclick = async () => { await api("/api/admin/logout", {}); showLogin(); };
+
+// ---------- tabs ----------
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x === b));
+  ["today", "emp", "rep", "set"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  if (b.dataset.tab === "today") loadToday();
+  if (b.dataset.tab === "emp") { loadEmployees(); initCamera(); }
+  if (b.dataset.tab === "rep") loadReport();
+  if (b.dataset.tab === "set") loadSettings();
+});
+
+const statusBadge = r => `<span class="badge ${esc(r.status).split(" ")[0]}">${esc(r.status)}</span>${r.late ? ' <span class="badge Half">Late</span>' : ""}`;
+const rowHTML = (r, showDate) => `<tr>${showDate ? `<td>${esc(r.work_date)}</td>` : ""}<td>${esc(r.emp_code)}</td><td>${esc(r.name)}</td>${showDate ? "" : `<td>${esc(r.department)}</td>`}<td>${esc(r.check_in || "-")}</td><td>${esc(r.check_out || "-")}</td><td>${r.hours ?? "-"}</td><td>${statusBadge(r)}</td></tr>`;
+
+// ---------- today ----------
+$("t-date").value = today();
+$("t-date").onchange = loadToday;
+async function loadToday() {
+  const { data } = await api("/api/admin/summary?date=" + $("t-date").value);
+  const present = data.filter(r => r.status !== "Absent").length;
+  $("stats").innerHTML = [["Employees", data.length], ["Present", present], ["Late", data.filter(r => r.late).length],
+    ["Absent", data.length - present], ["Still in", data.filter(r => r.status === "Working").length]]
+    .map(([k, v]) => `<div class="stat"><b>${v}</b>${k}</div>`).join("");
+  $("t-body").innerHTML = data.map(r => rowHTML(r, false)).join("") || `<tr><td colspan="7">No employees yet</td></tr>`;
+}
+
+// ---------- employees ----------
+async function initCamera() {
+  if (camStarted) return;
+  try {
+    await loadModels(); await startCamera($("video"));
+    camStarted = true; $("cam-status").textContent = "Camera ready."; $("btn-add").disabled = false;
+    startFaceBox($("video"), $("overlay"), () => $("btn-add").disabled || $("tab-emp").classList.contains("hidden"),
+      found => { $("cam-status").textContent = found ? "Face detected ✓" : "No face detected"; });
+  } catch (e) { $("cam-status").textContent = "Camera/models error: " + e.message; }
+}
+async function loadEmployees() {
+  const { data } = await api("/api/admin/employees");
+  $("emp-body").innerHTML = data.map(e => `<tr><td>${esc(e.emp_code)}</td><td>${esc(e.name)}</td><td>${esc(e.department)}</td>
+    <td>${e.active ? "Active" : "Inactive"}</td>
+    <td><button class="btn sm" data-re="${e.id}" data-name="${esc(e.name)}">Re-enroll face</button>
+        <button class="btn sm gray" data-tg="${e.id}">${e.active ? "Deactivate" : "Activate"}</button>
+        <button class="btn sm out" data-del="${e.id}" data-name="${esc(e.name)}">Delete</button></td></tr>`).join("");
+  document.querySelectorAll("[data-re]").forEach(b => b.onclick = () => startReenroll(b.dataset.re, b.dataset.name));
+  document.querySelectorAll("[data-tg]").forEach(b => b.onclick = async () => { await api(`/api/admin/employees/${b.dataset.tg}/toggle`, {}); loadEmployees(); });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete ${b.dataset.name} permanently?\nTheir attendance records will also be deleted.\n(Use Deactivate to keep history.)`)) return;
+    const { ok, data } = await api(`/api/admin/employees/${b.dataset.del}`, undefined, "DELETE");
+    toast(data.message || data.error, ok);
+    loadEmployees();
+  });
+}
+function startReenroll(id, name) {
+  reenrollId = id;
+  $("add-form").classList.add("hidden"); $("btn-cancel").classList.remove("hidden");
+  $("reenroll-bar").classList.remove("hidden"); $("reenroll-bar").textContent = "Re-enrolling face for " + name;
+  $("btn-add").textContent = "Capture new face";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+function endReenroll() {
+  reenrollId = null;
+  $("add-form").classList.remove("hidden"); $("btn-cancel").classList.add("hidden"); $("reenroll-bar").classList.add("hidden");
+  $("btn-add").textContent = "Capture & Register";
+}
+$("btn-cancel").onclick = endReenroll;
+$("btn-add").onclick = async () => {
+  const btn = $("btn-add");
+  if (btn.disabled) return;
+  const rid = reenrollId, name = $("e-name").value.trim(), code = $("e-code").value.trim();
+  if (!rid && (!name || !code)) return setMsg("Enter name and employee code first.", "err");
+  btn.disabled = true;
+  try {
+    setMsg("Hold still, capturing face...", "info");
+    const desc = await captureAveraged($("video"), 3);
+    if (!desc) return setMsg("Could not detect a face clearly. Try again.", "err");
+    const { ok, data } = rid
+      ? await api(`/api/admin/employees/${rid}/face`, { descriptor: desc })
+      : await api("/api/admin/employees", { name, emp_code: code, department: $("e-dept").value, descriptor: desc });
+    setMsg(data.message || data.error, ok ? "ok" : "err");
+    if (ok) { ["e-name", "e-code", "e-dept"].forEach(i => $(i).value = ""); endReenroll(); loadEmployees(); }
+  } finally { btn.disabled = false; }
+};
+
+// ---------- reports ----------
+$("r-from").value = $("r-to").value = today();
+const repQuery = () => `from=${$("r-from").value}&to=${$("r-to").value}&code=${encodeURIComponent($("r-code").value.trim())}`;
+async function loadReport() {
+  const { data } = await api("/api/admin/report?" + repQuery());
+  $("r-body").innerHTML = data.map(r => rowHTML(r, true)).join("") || `<tr><td colspan="7">No records</td></tr>`;
+}
+$("btn-rep").onclick = loadReport;
+$("btn-csv").onclick = () => { window.location = "/api/admin/export.csv?" + repQuery(); };
+
+// ---------- settings ----------
+async function loadSettings() {
+  const { data } = await api("/api/admin/settings");
+  $("s-start").value = data.shift_start; $("s-grace").value = data.grace_min;
+  $("s-full").value = data.full_day_hours; $("s-half").value = data.half_day_hours;
+}
+$("btn-save").onclick = async () => {
+  const { ok, data } = await api("/api/admin/settings", { shift_start: $("s-start").value, grace_min: $("s-grace").value,
+    full_day_hours: $("s-full").value, half_day_hours: $("s-half").value });
+  $("set-msg").textContent = data.message || data.error;
+  $("set-msg").style.color = ok ? "var(--ok)" : "var(--err)";
+};
+
+// ---------- boot ----------
+(async () => { const { data } = await api("/api/admin/me"); data.admin ? showApp() : showLogin(); })();
+</script>
+</body>
+</html>
